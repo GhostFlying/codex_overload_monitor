@@ -4,8 +4,8 @@
 `server_overloaded` 导致一轮结束后，等待指定时间；如果仍没有续跑，
 通过 `codex queue` 发送一次 `继续`。
 
-需要 Python 3.10+、支持 `codex queue` 的 Codex CLI，以及 Linux/macOS。
-使用当前用户的本地 Codex 数据目录。已在 Linux 的 Codex CLI 0.160.0
+需要 Python 3.10+、支持 `codex queue` 的 Codex CLI，以及 Linux/macOS/Windows。
+使用当前用户的本地 Codex 数据目录；Windows 通过标准库 `msvcrt` 实现文件锁。已在 Linux 的 Codex CLI 0.160.0
 数据格式上核对；数据库和 rollout 格式是内部接口，升级后可能需要适配。
 
 ## 使用

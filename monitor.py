@@ -4,7 +4,6 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
-import fcntl
 import json
 import math
 import os
@@ -13,6 +12,14 @@ import sqlite3
 import subprocess
 import sys
 import time
+
+if os.name == 'nt':
+    import msvcrt
+else:
+    import fcntl
+    msvcrt = None
+
+_IS_WINDOWS = os.name == 'nt'
 
 
 @contextmanager
@@ -25,17 +32,39 @@ def database(path):
         connection.close()
 
 
+@contextmanager
+def lock_file(path, *, create=False):
+    """Hold a non-blocking exclusive lock until the context exits."""
+    with Path(path).open('a+b' if create else 'r+b') as lock:
+        if _IS_WINDOWS:
+            lock.seek(0)
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                if getattr(error, 'winerror', None) in (32, 33):
+                    raise BlockingIOError from error
+                raise
+        else:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield lock
+        finally:
+            if _IS_WINDOWS:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def active(home, session_id):
     """A stale lock file is not an active writer."""
     try:
-        with (home / 'thread-writer-locks' / (session_id + '.lock')).open('rb') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        with lock_file(home / 'thread-writer-locks' / (session_id + '.lock')):
+            pass
     except FileNotFoundError:
         pass
+    except BlockingIOError:
+        return True
     return False
 
 
@@ -179,11 +208,12 @@ def main(argv=None):
     directory = args.codex_home.resolve() / 'overload-monitor'
     directory.mkdir(parents=True, exist_ok=True)
     try:
-        with (directory / 'monitor.lock').open('a') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('another monitor is running for this Codex home')
+        lock = lock_file(directory / 'monitor.lock', create=True)
+        try:
+            lock.__enter__()
+        except BlockingIOError:
+            raise RuntimeError('another monitor is running for this Codex home')
+        try:
             monitor = Monitor(args)
             print(f'monitoring: delay={args.delay:g}s poll={args.poll:g}s dry_run={args.dry_run}', flush=True)
             while True:
@@ -192,6 +222,8 @@ def main(argv=None):
                     print(f'checked {count} active sessions; {actions} actions', flush=True)
                     return 0
                 time.sleep(args.poll)
+        finally:
+            lock.__exit__(None, None, None)
     except KeyboardInterrupt:
         return 0
     except (OSError, ValueError, sqlite3.Error, RuntimeError) as error:

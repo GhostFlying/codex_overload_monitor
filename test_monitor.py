@@ -1,8 +1,8 @@
-import fcntl
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -22,14 +22,24 @@ class MonitorTest(unittest.TestCase):
             db.execute('INSERT INTO threads VALUES (?, ?, ?, ?, 0)', ('root', str(self.home), 'cli', str(self.log)))
         with sqlite3.connect(self.home / 'queue_1.sqlite') as db:
             db.execute('CREATE TABLE queued_items (thread_id)')
-        self.lock = (self.home / 'thread-writer-locks/root.lock').open('w')
-        self.addCleanup(self.lock.close)
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.lock_path = self.home / 'thread-writer-locks/root.lock'
+        self.acquire_session_lock()
+        self.addCleanup(self.release_session_lock)
         self.fake_codex = self.home / 'codex'
         self.fake_codex.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\nwith (Path(os.environ["CODEX_HOME"]) / "calls").open("a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\n')
         self.fake_codex.chmod(0o755)
         (self.home / 'overload-monitor').mkdir()
         self.args = monitor.arguments(['--all', '--codex-home', str(self.home), '--codex', str(self.fake_codex), '--delay', '200'])
+
+    def acquire_session_lock(self):
+        self.lock_context = monitor.lock_file(self.lock_path, create=True)
+        self.lock = self.lock_context.__enter__()
+
+    def release_session_lock(self):
+        if self.lock_context is not None:
+            self.lock_context.__exit__(None, None, None)
+            self.lock_context = None
+            self.lock = None
 
     def event(self, kind, turn='turn', overload=False, timestamp=None):
         payload = {'type': kind, 'turn_id': turn}
@@ -83,10 +93,10 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
 
     def test_stale_lock_and_subagent_excluded(self):
-        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.release_session_lock()
         self.event('task_complete', overload=True)
         self.assertEqual(monitor.Monitor(self.args).check(), (0, 0))
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.acquire_session_lock()
         with sqlite3.connect(self.home / 'state_5.sqlite') as db:
             db.execute('UPDATE threads SET source = ?', ('{"subagent": {}}',))
         self.assertEqual(monitor.Monitor(self.args).check(), (0, 0))
@@ -135,10 +145,21 @@ class MonitorTest(unittest.TestCase):
 
     def test_second_instance_cannot_send(self):
         self.event('task_complete', overload=True)
-        with (self.home / 'overload-monitor/monitor.lock').open('a') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with monitor.lock_file(self.home / 'overload-monitor/monitor.lock', create=True):
             self.assertEqual(monitor.main(['--all', '--codex-home', str(self.home), '--codex', str(self.fake_codex), '--once']), 1)
         self.assertEqual(self.calls(), [])
+
+    def test_windows_lock_branch(self):
+        calls = []
+        fake_msvcrt = SimpleNamespace(
+            LK_NBLCK=1,
+            LK_UNLCK=2,
+            locking=lambda fd, mode, size: calls.append((fd, mode, size)),
+        )
+        with patch.object(monitor, '_IS_WINDOWS', True), patch.object(monitor, 'msvcrt', fake_msvcrt):
+            with monitor.lock_file(self.home / 'windows.lock', create=True):
+                pass
+        self.assertEqual([mode for _, mode, _ in calls], [fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK])
 
 
 if __name__ == '__main__':
