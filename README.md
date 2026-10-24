@@ -5,8 +5,14 @@
 通过 `codex queue` 发送一次 `继续`。
 
 需要 Python 3.10+、支持 `codex queue` 的 Codex CLI，以及 Linux/macOS/Windows。
-使用当前用户的本地 Codex 数据目录；Windows 通过标准库 `msvcrt` 实现文件锁。已在 Linux 的 Codex CLI 0.160.0
-数据格式上核对；数据库和 rollout 格式是内部接口，升级后可能需要适配。
+使用当前用户的本地 Codex 数据目录。已在 Linux 的 Codex CLI 0.160.0 和
+Windows 的 0.164.0 数据格式上核对；数据库和 rollout 格式是内部接口，
+升级后可能需要适配。
+
+Windows 没有 `fcntl`，改用标准库 `msvcrt` 的字节范围锁。Codex 持有一个
+writer lock 时，`msvcrt.locking` 报的是 `EACCES`（`[Errno 13] Permission denied`）,
+而不是 `EWOULDBLOCK`，因此“锁已被占用”必须按 errno 判断；否则每个活跃会话
+都会被当成致命的权限错误，启动后第一次检查就退出。
 
 ## 使用
 
@@ -25,6 +31,13 @@ python3 monitor.py --all --delay 200
 python3 monitor.py --all --once --dry-run
 ```
 
+Windows（PowerShell，可用 pyenv-win 的 `python`）同样只是把 `python3` 换成 `python`：
+
+```powershell
+python .\monitor.py --all --delay 200
+python .\monitor.py --all --once --dry-run
+```
+
 三个选择器互斥，必须指定一个。默认每 600 秒（10 分钟）检查一次，`--poll` 可修改。
 `--delay` 默认 200 秒，从错误事件的时间开始计算，与检查间隔独立。
 启动时立即检查一次，之后每隔 `--poll` 秒检查；在错误已满 `--delay` 秒后的
@@ -32,13 +45,17 @@ python3 monitor.py --all --once --dry-run
 并不保证在错误后的第 200 秒发送，而是在满 200 秒后的下一次 10 分钟检查中发送。
 启动时也会检查尚未解决的旧 overload。Ctrl-C 停止监控。
 `--codex-home` 默认使用环境变量 `CODEX_HOME` 或 `~/.codex`；
-`--codex` 可指定 Codex 可执行文件。
+`--codex` 可指定 Codex 可执行文件（按 PATH 解析；Windows 上 npm 安装的
+`codex.cmd` 会经 `cmd.exe` 调用，`codex.exe` 直接调用）。
 
 “活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
 只处理未归档的根会话。子 agent 不接受直接输入，本工具不负责其调度。
 新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格；
 队列已有消息时不发送。只认结构化 `error.codex_error_info=server_overloaded`，
 不会匹配聊天内容里的错误关键词。
+Windows 数据库里的 `cwd` 带 `\\?\` 扩展长度前缀，比较前会去掉前缀并统一大小写，
+所以 `--cwd E:\code\app` 能匹配到记录为 `\\?\E:\code\app` 的会话。
+`codex queue` 的输出按 UTF-8 解码（`errors='replace'`），不受系统代码页影响。
 
 ## 如何识别 overload 后未续跑
 
@@ -86,8 +103,10 @@ dry-run 不写入发送记录，但会创建并持有监控工具自身的锁。
 ## 验证
 
 ```sh
-python3 -m unittest -v
+python3 -m unittest -v        # Windows: python -m unittest -v
 ```
 
-测试使用临时 Codex 数据库、实际文件锁和假的 Codex 可执行文件，
-覆盖目标选择、等待、取消、排队去重、重启去重、发送和失败退出。
+测试使用临时 Codex 数据库、实际文件锁，并把 `subprocess.run` 换成记录器，
+因此不需要真实的 Codex 可执行文件。覆盖目标选择、等待、取消、排队去重、
+重启去重、发送、失败退出，以及 Windows 的锁争用（`EACCES` 视为被占用）、
+批处理 shim 和 `\\?\` 路径前缀。
