@@ -79,10 +79,12 @@ class MonitorTest(unittest.TestCase):
             self.lock_context.__exit__(None, None, None)
             self.lock_context = None
 
-    def event(self, kind, turn='turn', overload=False, timestamp=None):
+    def event(self, kind, turn='turn', overload=False, timestamp=None, error=None):
         payload = {'type': kind, 'turn_id': turn}
         if overload:
             payload['error'] = {'codex_error_info': 'server_overloaded'}
+        if error is not None:
+            payload['error'] = error
         item = {'type': 'event_msg', 'timestamp': timestamp or '2020-01-01T00:00:00Z', 'payload': payload}
         with self.log.open('a') as stream:
             stream.write(json.dumps(item) + '\n')
@@ -107,6 +109,11 @@ class MonitorTest(unittest.TestCase):
             self.assertEqual(instance.check(), (1, 0))
         with patch('monitor.time.time', return_value=timestamp + 200):
             self.assertEqual(instance.check(), (1, 1))
+
+    def test_capacity_message_without_error_code_retries(self):
+        self.event('task_complete', error={'message': monitor.CAPACITY_ERROR})
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 1))
+        self.assertEqual(self.calls[0][0][-1], monitor.MESSAGE)
 
     def test_new_turn_normal_completion_and_abort_cancel(self):
         for kind in ('task_started', 'task_complete', 'turn_aborted', 'user_message'):

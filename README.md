@@ -38,8 +38,8 @@ python .\monitor.py --all --delay 200
 python .\monitor.py --all --once --dry-run
 ```
 
-三个选择器互斥，必须指定一个。默认每 600 秒（10 分钟）检查一次，`--poll` 可修改。
-`--delay` 默认 200 秒，从错误事件的时间开始计算，与检查间隔独立。
+三个选择器互斥，必须指定一个。`--poll` 是检查间隔，默认 600 秒（10 分钟）。
+`--delay` 是错误发生后等待重试的时间，默认 200 秒；两者独立。
 启动时立即检查一次，之后每隔 `--poll` 秒检查；在错误已满 `--delay` 秒后的
 第一次检查中发送，通常在 delay 到 delay + poll 秒之间。例如默认配置下，
 并不保证在错误后的第 200 秒发送，而是在满 200 秒后的下一次 10 分钟检查中发送。
@@ -51,7 +51,8 @@ python .\monitor.py --all --once --dry-run
 “活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
 只处理未归档的根会话。子 agent 不接受直接输入，本工具不负责其调度。
 新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格；
-队列已有消息时不发送。只认结构化 `error.codex_error_info=server_overloaded`，
+队列已有消息时不发送。只认任务完成事件里的结构化 `error.codex_error_info=server_overloaded`，
+或精确错误消息 `Selected model is at capacity. Please try a different model.`；
 不会匹配聊天内容里的错误关键词。
 Windows 数据库里的 `cwd` 带 `\\?\` 扩展长度前缀，比较前会去掉前缀并统一大小写，
 所以 `--cwd E:\code\app` 能匹配到记录为 `\\?\E:\code\app` 的会话。

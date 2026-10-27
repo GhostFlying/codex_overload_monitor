@@ -23,6 +23,7 @@ else:
     import fcntl
 
 MESSAGE = '继续'
+CAPACITY_ERROR = 'Selected model is at capacity. Please try a different model.'
 # Byte range locked to claim a file. Windows reports a held range as EACCES
 # instead of EWOULDBLOCK, so contention has to be classified explicitly.
 LOCK_BYTES = 1
@@ -134,6 +135,16 @@ def active(home, session_id):
     return False
 
 
+def is_capacity_error(error):
+    """Recognize structured overload errors and their plain-text variant."""
+    if isinstance(error, str):
+        return error == CAPACITY_ERROR
+    return isinstance(error, dict) and (
+        error.get('codex_error_info') == 'server_overloaded'
+        or error.get('message') == CAPACITY_ERROR
+    )
+
+
 class Rollout:
     def __init__(self, path):
         self.path = Path(path)
@@ -168,7 +179,7 @@ class Rollout:
             elif kind == 'task_complete':
                 error = payload.get('error') or {}
                 self.error = None
-                if isinstance(error, dict) and error.get('codex_error_info') == 'server_overloaded':
+                if is_capacity_error(error):
                     timestamp = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00')).timestamp()
                     self.error = (payload['turn_id'], item['timestamp'], timestamp)
         # Some versions record accepted user input without a user_message event.
