@@ -4,15 +4,112 @@
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
-import fcntl
+import errno
 import json
 import math
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+
+IS_WINDOWS = os.name == 'nt'
+
+if IS_WINDOWS:
+    import msvcrt
+else:
+    import fcntl
+
+MESSAGE = '继续'
+# Byte range locked to claim a file. Windows reports a held range as EACCES
+# instead of EWOULDBLOCK, so contention has to be classified explicitly.
+LOCK_BYTES = 1
+BUSY_ERRNOS = frozenset((errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, getattr(errno, 'EDEADLK', 36)))
+BUSY_WINERRORS = frozenset((32, 33, 36))
+
+
+def comparable(path):
+    """A path form that compares database paths with command-line paths.
+
+    Windows sessions record their cwd with the extended-length `\\\\?\\` prefix,
+    which `Path.resolve()` keeps and which never equals a plain `E:\\...` path.
+    """
+    text = str(path)
+    if IS_WINDOWS:
+        if text.startswith('\\\\?\\UNC\\'):
+            text = '\\\\' + text[len('\\\\?\\UNC\\'):]
+        elif text.startswith('\\\\?\\'):
+            text = text[len('\\\\?\\'):]
+        return os.path.normcase(os.path.realpath(text))
+    return str(Path(text).resolve())
+
+
+def contended(error):
+    """Whether a failed lock attempt means another holder rather than a real error.
+
+    `msvcrt.locking` reports an already locked byte range as EACCES/EDEADLK,
+    so treating only BlockingIOError as contention turns every active session
+    into a fatal `Permission denied`.
+    """
+    return error.errno in BUSY_ERRNOS or getattr(error, 'winerror', None) in BUSY_WINERRORS
+
+
+class FileLock:
+    """A non-blocking exclusive file lock held until the block exits."""
+
+    def __init__(self, path, *, create=False):
+        self.path = Path(path)
+        self.create = create
+        self.handle = None
+
+    def __enter__(self):
+        handle = self.path.open('a+b' if self.create else 'r+b')
+        try:
+            handle.seek(0)
+            if IS_WINDOWS:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, LOCK_BYTES)
+                except OSError as error:
+                    if not contended(error):
+                        raise
+                    raise BlockingIOError(error.errno, error.strerror, str(self.path)) from error
+            else:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            handle.close()
+            raise
+        self.handle = handle
+        return self
+
+    def __exit__(self, *exception):
+        handle, self.handle = self.handle, None
+        if handle is None:
+            return False
+        try:
+            if IS_WINDOWS:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, LOCK_BYTES)
+            else:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        return False
+
+
+@contextmanager
+def instance_lock(path):
+    """Refuse to run twice against one Codex home."""
+    lock = FileLock(path, create=True)
+    try:
+        lock.__enter__()
+    except BlockingIOError as error:
+        raise RuntimeError('another monitor is running for this Codex home') from error
+    try:
+        yield lock
+    finally:
+        lock.__exit__(None, None, None)
 
 
 @contextmanager
@@ -28,14 +125,12 @@ def database(path):
 def active(home, session_id):
     """A stale lock file is not an active writer."""
     try:
-        with (home / 'thread-writer-locks' / (session_id + '.lock')).open('rb') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-            fcntl.flock(lock, fcntl.LOCK_UN)
+        with FileLock(home / 'thread-writer-locks' / (session_id + '.lock')):
+            pass
     except FileNotFoundError:
-        pass
+        return False
+    except BlockingIOError:
+        return True
     return False
 
 
@@ -100,7 +195,7 @@ class Monitor:
                 continue
             if self.args.session and row['id'] not in self.args.session:
                 continue
-            if self.args.cwd and Path(row['cwd']).resolve() != self.args.cwd.resolve():
+            if self.args.cwd and comparable(row['cwd']) != comparable(self.args.cwd):
                 continue
             if active(self.home, row['id']):
                 targets.append(row)
@@ -109,6 +204,14 @@ class Monitor:
     def queued(self, session_id):
         with database(self.home / 'queue_1.sqlite') as connection:
             return connection.execute('SELECT 1 FROM queued_items WHERE thread_id = ? LIMIT 1', (session_id,)).fetchone() is not None
+
+    def command(self, session_id):
+        """`codex queue` argv for one session, resolved through the platform shim."""
+        program = shutil.which(self.args.codex) or str(self.args.codex)
+        argv = [program, 'queue', '--thread', session_id, '--message', MESSAGE]
+        if IS_WINDOWS and Path(program).suffix.lower() in ('.cmd', '.bat'):
+            return ['cmd.exe', '/c'] + argv  # CreateProcess cannot start a batch shim.
+        return argv
 
     def check(self):
         targets = self.targets()
@@ -136,7 +239,7 @@ class Monitor:
                     print(f'would continue {session_id} turn={error[0]}', flush=True)
                 else:
                     env = dict(os.environ, CODEX_HOME=str(self.home))
-                    subprocess.run([self.args.codex, 'queue', '--thread', session_id, '--message', '继续'], env=env, check=True, capture_output=True, text=True, timeout=30)
+                    subprocess.run(self.command(session_id), env=env, check=True, capture_output=True, encoding='utf-8', errors='replace', timeout=30)
                     self.sent[session_id] = key
                     temporary = self.ledger_path.with_suffix('.tmp')
                     temporary.write_text(json.dumps(self.sent) + '\n')
@@ -179,11 +282,7 @@ def main(argv=None):
     directory = args.codex_home.resolve() / 'overload-monitor'
     directory.mkdir(parents=True, exist_ok=True)
     try:
-        with (directory / 'monitor.lock').open('a') as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('another monitor is running for this Codex home')
+        with instance_lock(directory / 'monitor.lock'):
             monitor = Monitor(args)
             print(f'monitoring: delay={args.delay:g}s poll={args.poll:g}s dry_run={args.dry_run}', flush=True)
             while True:
