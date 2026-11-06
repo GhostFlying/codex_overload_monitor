@@ -50,6 +50,7 @@ python .\monitor.py --all --once --dry-run
 
 “活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
 只处理未归档的根会话。子 agent 不接受直接输入，本工具不负责其调度。
+如果清理对话后数据库仍保留 thread 记录、但对应 rollout 文件已不存在，会跳过该会话并继续监控其他会话。
 新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格；
 队列已有消息时不发送。只认任务完成事件里的结构化 `error.codex_error_info=server_overloaded`，
 或精确错误消息 `Selected model is at capacity. Please try a different model.`；

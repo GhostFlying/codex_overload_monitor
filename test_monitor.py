@@ -198,12 +198,11 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertFalse((self.home / 'overload-monitor/sent.json').exists())
 
-    def test_missing_rollout_stops_monitor(self):
+    def test_missing_rollout_is_ignored(self):
         with sqlite_file(self.home / 'state_5.sqlite') as db:
             db.execute('UPDATE threads SET rollout_path = ?', (str(self.home / 'missing.jsonl'),))
-        self.event('task_complete', overload=True)
-        with self.assertRaises(RuntimeError):
-            monitor.Monitor(self.args).check()
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
+        self.assertEqual(self.calls, [])
 
     def test_second_instance_cannot_send(self):
         self.event('task_complete', overload=True)
