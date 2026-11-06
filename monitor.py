@@ -153,7 +153,15 @@ class Rollout:
         self.error = None
 
     def refresh(self):
-        with self.path.open('rb') as stream:
+        try:
+            stream = self.path.open('rb')
+        except FileNotFoundError:
+            # Codex can retain a thread row after its rollout was cleaned up.
+            self.identity = None
+            self.offset = 0
+            self.error = None
+            return None
+        with stream:
             stat = os.fstat(stream.fileno())
             identity = (stat.st_dev, stat.st_ino)
             if identity != self.identity or stat.st_size < self.offset:
