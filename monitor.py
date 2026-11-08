@@ -161,6 +161,7 @@ class Rollout:
             self.identity = None
             self.offset = 0
             self.error = None
+            self.aborted = None
             return None
         with stream:
             stat = os.fstat(stream.fileno())
@@ -214,6 +215,17 @@ class Monitor:
         self.sent = json.loads(self.ledger_path.read_text()) if self.ledger_path.exists() else {}
         self.rollouts = {}
 
+    def get_rollout(self, row):
+        session_id = row['id']
+        rollout = self.rollouts.get(session_id)
+        if rollout is None or rollout.path != Path(row['rollout_path']):
+            rollout = self.rollouts[session_id] = Rollout(row['rollout_path'])
+        return rollout
+
+    def has_aborted_turn(self, row):
+        rollout = self.get_rollout(row)
+        return rollout.refresh() is None and rollout.aborted is not None
+
     def targets(self):
         with database(self.home / 'state_5.sqlite') as connection:
             rows = connection.execute('SELECT id, cwd, source, rollout_path FROM threads WHERE archived = 0').fetchall()
@@ -225,7 +237,9 @@ class Monitor:
                 continue
             if self.args.cwd and comparable(row['cwd']) != comparable(self.args.cwd):
                 continue
-            if active(self.home, row['id']):
+            if active(self.home, row['id']) or (
+                getattr(self.args, 'resume_aborted', True) and self.has_aborted_turn(row)
+            ):
                 targets.append(row)
         return targets
 
@@ -249,9 +263,7 @@ class Monitor:
         for row in targets:
             session_id = row['id']
             try:
-                rollout = self.rollouts.get(session_id)
-                if rollout is None or rollout.path != Path(row['rollout_path']):
-                    rollout = self.rollouts[session_id] = Rollout(row['rollout_path'])
+                rollout = self.get_rollout(row)
                 error = rollout.refresh()
                 pending = error or (rollout.aborted if getattr(self.args, 'resume_aborted', True) else None)
                 if pending is None:
@@ -264,7 +276,8 @@ class Monitor:
                 # Recheck immediately before sending; a manual/client retry cancels it.
                 refreshed = rollout.refresh()
                 current = refreshed or (rollout.aborted if getattr(self.args, 'resume_aborted', True) else None)
-                if current != pending or not active(self.home, session_id):
+                aborted = refreshed is None and rollout.aborted == pending
+                if current != pending or (not active(self.home, session_id) and not aborted):
                     continue
                 if self.args.dry_run:
                     print(f'would continue {session_id} turn={pending[0]}', flush=True)

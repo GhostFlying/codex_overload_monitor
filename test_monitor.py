@@ -139,6 +139,11 @@ class MonitorTest(unittest.TestCase):
         self.args.resume_aborted = False
         self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
 
+    def test_aborted_turn_does_not_require_writer_lock(self):
+        self.release_session_lock()
+        self.event('turn_aborted')
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 1))
+
     def test_manual_input_cancels(self):
         self.event('task_complete', overload=True)
         with self.log.open('a') as stream:

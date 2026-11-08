@@ -51,7 +51,8 @@ python .\monitor.py --all --once --dry-run
 `--codex` 可指定 Codex 可执行文件（按 PATH 解析；Windows 上 npm 安装的
 `codex.cmd` 会经 `cmd.exe` 调用，`codex.exe` 直接调用）。
 
-“活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
+普通 overload 的“活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
+中断 turn 可能在写入 `turn_aborted` 后释放 writer lock，默认恢复仍会检查这类会话。
 只处理未归档的根会话。子 agent 不接受直接输入，本工具不负责其调度。
 如果清理对话后数据库仍保留 thread 记录、但对应 rollout 文件已不存在，会跳过该会话并继续监控其他会话。
 新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格。
