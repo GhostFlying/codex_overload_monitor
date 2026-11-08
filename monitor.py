@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continue active local Codex root sessions after unresolved overload errors."""
+"""Continue active local Codex root sessions after overload errors or interruptions."""
 
 import argparse
 from contextlib import contextmanager
@@ -151,6 +151,7 @@ class Rollout:
         self.identity = None
         self.offset = 0
         self.error = None
+        self.aborted = None
 
     def refresh(self):
         try:
@@ -167,6 +168,7 @@ class Rollout:
             if identity != self.identity or stat.st_size < self.offset:
                 self.offset = 0
                 self.error = None
+                self.aborted = None
                 self.identity = identity
             stream.seek(self.offset)
             while True:
@@ -182,11 +184,17 @@ class Rollout:
         payload = item.get('payload', {})
         if item.get('type') == 'event_msg':
             kind = payload.get('type')
-            if kind in ('task_started', 'turn_aborted', 'user_message'):
+            if kind in ('task_started', 'user_message'):
                 self.error = None
+                self.aborted = None
+            elif kind == 'turn_aborted':
+                self.error = None
+                timestamp = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00')).timestamp()
+                self.aborted = (payload['turn_id'], item['timestamp'], timestamp)
             elif kind == 'task_complete':
                 error = payload.get('error') or {}
                 self.error = None
+                self.aborted = None
                 if is_capacity_error(error):
                     timestamp = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00')).timestamp()
                     self.error = (payload['turn_id'], item['timestamp'], timestamp)
@@ -194,6 +202,7 @@ class Rollout:
         messages = payload.get('items', []) if item.get('type') == 'history_mutation' else [payload] if item.get('type') == 'response_item' else []
         if any(x.get('type') == 'message' and x.get('role') == 'user' for x in messages):
             self.error = None
+            self.aborted = None
 
 
 class Monitor:
@@ -244,18 +253,21 @@ class Monitor:
                 if rollout is None or rollout.path != Path(row['rollout_path']):
                     rollout = self.rollouts[session_id] = Rollout(row['rollout_path'])
                 error = rollout.refresh()
-                if error is None:
+                pending = error or (rollout.aborted if getattr(self.args, 'resume_aborted', True) else None)
+                if pending is None:
                     continue
-                key = list(error[:2])
-                if self.sent.get(session_id) == key or time.time() - error[2] < self.args.delay:
+                key = list(pending[:2])
+                if self.sent.get(session_id) == key or time.time() - pending[2] < self.args.delay:
                     continue
                 if self.queued(session_id):
                     continue
                 # Recheck immediately before sending; a manual/client retry cancels it.
-                if rollout.refresh() != error or not active(self.home, session_id):
+                refreshed = rollout.refresh()
+                current = refreshed or (rollout.aborted if getattr(self.args, 'resume_aborted', True) else None)
+                if current != pending or not active(self.home, session_id):
                     continue
                 if self.args.dry_run:
-                    print(f'would continue {session_id} turn={error[0]}', flush=True)
+                    print(f'would continue {session_id} turn={pending[0]}', flush=True)
                 else:
                     env = dict(os.environ, CODEX_HOME=str(self.home))
                     subprocess.run(self.command(session_id), env=env, check=True, capture_output=True, encoding='utf-8', errors='replace', timeout=30)
@@ -263,7 +275,7 @@ class Monitor:
                     temporary = self.ledger_path.with_suffix('.tmp')
                     temporary.write_text(json.dumps(self.sent) + '\n')
                     temporary.replace(self.ledger_path)
-                    print(f'continued {session_id} turn={error[0]}', flush=True)
+                    print(f'continued {session_id} turn={pending[0]}', flush=True)
                 actions += 1
             except (OSError, ValueError, KeyError, sqlite3.Error, subprocess.SubprocessError) as error:
                 # Exit on an uncertain send outcome rather than enqueue again.
@@ -285,6 +297,8 @@ def arguments(argv=None):
     selector.add_argument('--cwd', type=Path, help='exact working directory (not recursive)')
     selector.add_argument('--all', action='store_true', help='all active local root sessions')
     parser.add_argument('--delay', type=duration, default=200, help='seconds after overload before continuing (default: 200)')
+    parser.add_argument('--no-resume-aborted', dest='resume_aborted', action='store_false', help='do not continue turns interrupted before completion')
+    parser.set_defaults(resume_aborted=True)
     parser.add_argument('--poll', type=duration, default=600, help='check interval in seconds (default: 600)')
     parser.add_argument('--codex-home', type=Path, default=Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser())
     parser.add_argument('--codex', default='codex', help='Codex executable (default: codex)')
