@@ -115,13 +115,34 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(monitor.Monitor(self.args).check(), (1, 1))
         self.assertEqual(self.calls[0][0][-1], monitor.MESSAGE)
 
-    def test_new_turn_normal_completion_and_abort_cancel(self):
-        for kind in ('task_started', 'task_complete', 'turn_aborted', 'user_message'):
+    def test_new_turn_normal_completion_cancels(self):
+        for kind in ('task_started', 'task_complete', 'user_message'):
             with self.subTest(kind=kind):
                 self.event('task_complete', overload=True)
                 self.event(kind)
                 self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
         self.assertEqual(self.calls, [])
+
+    def test_aborted_turn_resumes_by_default(self):
+        self.event('turn_aborted')
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 1))
+        self.assertEqual(self.calls[0][0][-1], monitor.MESSAGE)
+
+    def test_aborted_turn_manual_input_cancels_resume(self):
+        self.event('turn_aborted')
+        self.event('user_message')
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
+        self.assertEqual(self.calls, [])
+
+    def test_aborted_turn_can_be_disabled(self):
+        self.event('turn_aborted')
+        self.args.resume_aborted = False
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 0))
+
+    def test_aborted_turn_does_not_require_writer_lock(self):
+        self.release_session_lock()
+        self.event('turn_aborted')
+        self.assertEqual(monitor.Monitor(self.args).check(), (1, 1))
 
     def test_manual_input_cancels(self):
         self.event('task_complete', overload=True)

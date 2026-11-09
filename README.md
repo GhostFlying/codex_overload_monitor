@@ -1,7 +1,7 @@
 # Codex overload monitor
 
 一个不调用模型的前台小工具：监控本机活跃 Codex 根会话，在
-`server_overloaded` 导致一轮结束后，等待指定时间；如果仍没有续跑，
+`server_overloaded` 导致一轮结束，或响应被中断后，等待指定时间；如果仍没有续跑，
 通过 `codex queue` 发送一次 `继续`。
 
 需要 Python 3.10+、支持 `codex queue` 的 Codex CLI，以及 Linux/macOS/Windows。
@@ -29,6 +29,9 @@ python3 monitor.py --all --delay 200
 
 # 只读检查一次：不会发送消息
 python3 monitor.py --all --once --dry-run
+
+# 默认自动恢复“响应中断”
+python3 monitor.py --all --delay 60
 ```
 
 Windows（PowerShell，可用 pyenv-win 的 `python`）同样只是把 `python3` 换成 `python`：
@@ -48,10 +51,14 @@ python .\monitor.py --all --once --dry-run
 `--codex` 可指定 Codex 可执行文件（按 PATH 解析；Windows 上 npm 安装的
 `codex.cmd` 会经 `cmd.exe` 调用，`codex.exe` 直接调用）。
 
-“活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
+普通 overload 的“活跃”指会话 writer lock 当前被持有；文件存在但无人持锁不算活跃。
+中断 turn 可能在写入 `turn_aborted` 后释放 writer lock，默认恢复仍会检查这类会话。
 只处理未归档的根会话。子 agent 不接受直接输入，本工具不负责其调度。
 如果清理对话后数据库仍保留 thread 记录、但对应 rollout 文件已不存在，会跳过该会话并继续监控其他会话。
-新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格；
+新 turn、用户输入、正常完成或中断都会取消旧 overload 的续跑资格。
+默认情况下，`turn_aborted` 也会在等待 `--delay` 后续跑；
+Codex 当前把手动停止和执行器中断都记录为 `reason=interrupted`，无法从事件中区分，
+所以需要保留旧行为时使用 `--no-resume-aborted`。用户输入会取消待恢复 turn；
 队列已有消息时不发送。只认任务完成事件里的结构化 `error.codex_error_info=server_overloaded`，
 或精确错误消息 `Selected model is at capacity. Please try a different model.`；
 不会匹配聊天内容里的错误关键词。
